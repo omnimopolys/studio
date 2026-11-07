@@ -1,0 +1,180 @@
+name: Studio
+
+# Reusable workflow. Each game repo calls it from a thin hook file
+# (see templates/game-hook.yml). It runs in the game repo's context:
+# "github.event" and the checkout are the game repo; the agent prompts
+# come from this studio repo (checked out into .studio/).
+on:
+  workflow_call:
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      AGENT_GH_TOKEN:
+        required: true
+
+env:
+  STUDIO_REPO: omnimopolys/studio
+
+jobs:
+  # Required status check. The game decides what to check in scripts/check.sh.
+  check:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scripts/check.sh of the game
+        run: |
+          if [[ -f scripts/check.sh ]]; then bash scripts/check.sh
+          else echo "No scripts/check.sh yet – nothing to check."; fi
+
+  triage:
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'agent-triage'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: triage-${{ github.event.client_payload.issue }}
+    env:
+      # Bot token on purpose: labels set here show sender type "Bot",
+      # so n8n never treats them as a human "agent:ready".
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.STUDIO_REPO }}
+          path: .studio
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            Follow the instructions in .studio/prompts/triage.md.
+            $ARGUMENTS is ${{ github.event.client_payload.issue }}. Repository: ${{ github.repository }}.
+          claude_args: >-
+            --max-turns 20
+            --allowedTools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh issue comment:*),Bash(gh issue list:*),Bash(gh label list:*)"
+
+  work:
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'agent-work'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      issues: write
+    # One agent at a time per game. Later runs wait in the queue.
+    concurrency:
+      group: agent-work-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      ISSUE: ${{ github.event.client_payload.issue }}
+    steps:
+      - name: Validate issue number
+        run: '[[ "$ISSUE" =~ ^[0-9]+$ ]] || { echo "bad issue number"; exit 1; }'
+      - name: Mark issue as in progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --add-label agent:working --remove-label agent:ready
+      # AGENT_GH_TOKEN (fine-grained PAT, no "workflows" permission) so that
+      # the agent PR triggers the check and the agent cannot change .github/workflows.
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.AGENT_GH_TOKEN }}
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.STUDIO_REPO }}
+          path: .studio
+      - name: Keep studio files out of game commits
+        run: echo ".studio/" >> .git/info/exclude
+      - name: Git identity
+        run: |
+          git config user.name "omnimopolys-agent"
+          git config user.email "agent@users.noreply.github.com"
+      - uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GH_TOKEN }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.AGENT_GH_TOKEN }}
+          prompt: |
+            Follow the instructions in .studio/prompts/work-issue.md.
+            $ARGUMENTS is ${{ github.event.client_payload.issue }}. Repository: ${{ github.repository }}.
+          claude_args: >-
+            --max-turns 80
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(bash scripts/check.sh:*),Bash(cargo:*),Bash(rustup:*),Bash(sudo apt-get:*),Bash(git:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh pr create:*),Bash(gh pr merge:*),Bash(gh pr view:*)"
+      - name: Clear working label
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --remove-label agent:working || true
+
+  # "@claude ..." in an issue or PR comment. The action checks that
+  # the commenter has write access to the repo.
+  mention:
+    if: >-
+      (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment')
+      && contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.AGENT_GH_TOKEN }}
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GH_TOKEN }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.AGENT_GH_TOKEN }}
+          claude_args: --max-turns 40
+
+  # Started by n8n when a milestone "vX.Y.Z – ..." is closed.
+  # Makes release notes and a GitHub Release. Game builds come later from the game repo.
+  release:
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: read
+    concurrency:
+      group: release-${{ github.repository }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ github.event.client_payload.version }}
+    steps:
+      - name: Validate version
+        run: '[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "bad version: $VERSION"; exit 1; }'
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.STUDIO_REPO }}
+          path: .studio
+      - uses: anthropics/claude-code-action@v1
+        continue-on-error: true
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            Follow the instructions in .studio/prompts/release-notes.md.
+            $ARGUMENTS is ${{ github.event.client_payload.version }}.
+          claude_args: >-
+            --max-turns 20
+            --allowedTools "Read,Write,Bash(git log:*),Bash(git describe:*),Bash(gh pr list:*),Bash(gh pr view:*)"
+      - name: Publish GitHub Release
+        run: |
+          test -s RELEASE_NOTES.md || echo "Automatic notes below." > RELEASE_NOTES.md
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "v$VERSION" --notes-file RELEASE_NOTES.md --generate-notes

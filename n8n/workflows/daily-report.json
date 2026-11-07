@@ -1,0 +1,153 @@
+{
+  "name": "Omnimopolys – Daily Report",
+  "nodes": [
+    {
+      "name": "Every day 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Build query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const since = new Date(Date.now() - 864e5).toISOString().slice(0, 10);\nreturn [{ json: { query: \"query($since:String!){repository(owner:\\\"omnimopolys\\\",name:\\\"omnimopolys\\\"){open:issues(states:OPEN){totalCount} bugs:issues(states:OPEN,labels:[\\\"type:bug\\\"]){totalCount} working:issues(states:OPEN,labels:[\\\"agent:working\\\"]){totalCount} blocked:issues(states:OPEN,labels:[\\\"needs-human\\\"],first:10){totalCount nodes{number title url}} prs:pullRequests(states:OPEN,first:10){totalCount nodes{number title}} milestones(states:OPEN,first:3,orderBy:{field:DUE_DATE,direction:ASC}){nodes{title progressPercentage}}} merged:search(query:$since,type:ISSUE,first:20){issueCount nodes{... on PullRequest{number title}}}}\", variables: { since: 'repo:omnimopolys/omnimopolys is:pr is:merged merged:>=' + since } } }];\n"
+      }
+    },
+    {
+      "name": "Query GitHub",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.github.com/graphql",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "credentials": {
+        "githubApi": {
+          "id": "__GITHUB_CRED_ID__",
+          "name": "GitHub omnimopolys"
+        }
+      }
+    },
+    {
+      "name": "Format",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const d = $input.first().json.data;\nconst r = d.repository;\nconst lines = [];\nlines.push(`📋 **Omnimopolys daily report** – ${new Date().toISOString().slice(0, 10)}`);\nlines.push(`Open issues: ${r.open.totalCount} · Bugs: ${r.bugs.totalCount} · Agent working: ${r.working.totalCount} · Open PRs: ${r.prs.totalCount}`);\nfor (const m of r.milestones.nodes) lines.push(`🏁 ${m.title}: ${Math.round(m.progressPercentage)}%`);\nlines.push(`\\n✅ Merged last 24h: ${d.merged.issueCount}`);\nfor (const p of d.merged.nodes) lines.push(`• #${p.number} ${p.title}`);\nif (r.blocked.totalCount) {\n  lines.push(`\\n🙋 Needs a human: ${r.blocked.totalCount}`);\n  for (const i of r.blocked.nodes) lines.push(`• #${i.number} ${i.title} <${i.url}>`);\n}\nreturn [{ json: { message: lines.join('\\n').slice(0, 1990) } }];\n"
+      }
+    },
+    {
+      "name": "Discord",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "authentication": "webhook",
+        "content": "={{ $json.message }}",
+        "options": {}
+      },
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "__DISCORD_CRED_ID__",
+          "name": "Discord omnimopolys"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every day 08:00": {
+      "main": [
+        [
+          {
+            "node": "Build query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build query": {
+      "main": [
+        [
+          {
+            "node": "Query GitHub",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query GitHub": {
+      "main": [
+        [
+          {
+            "node": "Format",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format": {
+      "main": [
+        [
+          {
+            "node": "Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "errorWorkflow": "__ERROR_WORKFLOW_ID__"
+  }
+}

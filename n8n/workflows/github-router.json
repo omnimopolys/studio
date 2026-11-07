@@ -1,0 +1,217 @@
+{
+  "name": "Omnimopolys – GitHub Router",
+  "nodes": [
+    {
+      "name": "GitHub events",
+      "type": "n8n-nodes-base.githubTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "5b0f2f6e-6f53-4c55-9a3e-0b6a1c1f7a01",
+      "parameters": {
+        "authentication": "accessToken",
+        "owner": {
+          "__rl": true,
+          "value": "omnimopolys",
+          "mode": "name"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "omnimopolys",
+          "mode": "name"
+        },
+        "events": [
+          "*"
+        ],
+        "options": {}
+      },
+      "credentials": {
+        "githubApi": {
+          "id": "__GITHUB_CRED_ID__",
+          "name": "GitHub omnimopolys"
+        }
+      }
+    },
+    {
+      "name": "Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Decide what to do with one GitHub webhook event.\n// route 0 = new issue: add to board + triage agent\n// route 1 = repository_dispatch to GitHub Actions\n// route 2 = Discord message\nconst raw = $input.first().json;\nconst e = raw.body ?? raw;\nconst out = [];\nconst dispatch = (event_type, client_payload) => ({ event_type, client_payload });\n\n// New issue (not a PR)\nif (e.action === 'opened' && e.issue && !e.issue.pull_request) {\n  out.push({ route: 0,\n    graphql: { query: 'mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}',\n               variables: { p: '__PROJECT_ID__', c: e.issue.node_id } },\n    dispatch: dispatch('agent-triage', { issue: e.issue.number }) });\n}\n\n// A human adds \"agent:ready\". Only users with triage rights can add labels.\n// Bots (e.g. the triage agent) are ignored, so issue text cannot start the work agent.\nif (e.action === 'labeled' && e.issue && e.label?.name === 'agent:ready' && e.sender?.type === 'User') {\n  out.push({ route: 1, dispatch: dispatch('agent-work', { issue: e.issue.number }) });\n}\n\n// Agent is blocked\nif (e.action === 'labeled' && e.issue && e.label?.name === 'needs-human') {\n  out.push({ route: 2, message: `🙋 Needs a human: #${e.issue.number} ${e.issue.title}\\n${e.issue.html_url}` });\n}\n\n// Milestone \"v1.2.3 – Title\" closed → release\nif (e.action === 'closed' && e.milestone && !e.issue && !e.pull_request) {\n  const m = /v?(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)/.exec(e.milestone.title);\n  if (m) {\n    out.push({ route: 1, dispatch: dispatch('release', { version: m[1] }) });\n    out.push({ route: 2, message: `🚀 Release v${m[1]} started (milestone \"${e.milestone.title}\" closed).` });\n  } else {\n    out.push({ route: 2, message: `⚠️ Milestone \"${e.milestone.title}\" closed, but it has no version like v1.2.3. No release.` });\n  }\n}\n\n// Release published\nif (e.action === 'published' && e.release) {\n  out.push({ route: 2, message: `🎉 ${e.release.name || e.release.tag_name} is out!\\n${e.release.html_url}` });\n}\n\n// PR merged\nif (e.action === 'closed' && e.pull_request?.merged) {\n  out.push({ route: 2, message: `✅ Merged #${e.pull_request.number}: ${e.pull_request.title}` });\n}\n\n// Failed workflow run on main (agents, release) or on an agent branch\nif (e.action === 'completed' && e.workflow_run && e.workflow_run.conclusion === 'failure') {\n  const r = e.workflow_run;\n  if (r.head_branch === 'main' || r.head_branch?.startsWith('agent/')) {\n    out.push({ route: 2, message: `❌ ${r.name} failed on ${r.head_branch}\\n${r.html_url}` });\n  }\n}\n\nreturn out.map(json => ({ json }));\n"
+      }
+    },
+    {
+      "name": "Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 3,
+        "output": "={{ $json.route }}"
+      }
+    },
+    {
+      "name": "Add to Roadmap",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        -160
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.github.com/graphql",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.graphql) }}",
+        "options": {}
+      },
+      "credentials": {
+        "githubApi": {
+          "id": "__GITHUB_CRED_ID__",
+          "name": "GitHub omnimopolys"
+        }
+      }
+    },
+    {
+      "name": "Dispatch to GitHub Actions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.github.com/repos/omnimopolys/omnimopolys/dispatches",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Route').item.json.dispatch) }}",
+        "options": {}
+      },
+      "credentials": {
+        "githubApi": {
+          "id": "__GITHUB_CRED_ID__",
+          "name": "GitHub omnimopolys"
+        }
+      }
+    },
+    {
+      "name": "Discord",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        660,
+        180
+      ],
+      "parameters": {
+        "authentication": "webhook",
+        "content": "={{ $json.message }}",
+        "options": {}
+      },
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "__DISCORD_CRED_ID__",
+          "name": "Discord omnimopolys"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "GitHub events": {
+      "main": [
+        [
+          {
+            "node": "Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Add to Roadmap",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Dispatch to GitHub Actions",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add to Roadmap": {
+      "main": [
+        [
+          {
+            "node": "Dispatch to GitHub Actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin",
+    "errorWorkflow": "__ERROR_WORKFLOW_ID__"
+  }
+}

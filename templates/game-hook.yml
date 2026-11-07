@@ -1,0 +1,24 @@
+# Copy to <game repo>/.github/workflows/studio.yml. Do not add logic here:
+# all agent logic lives in https://github.com/omnimopolys/studio
+name: Studio
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  repository_dispatch:
+    types: [agent-triage, agent-work, release]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  studio:
+    uses: omnimopolys/studio/.github/workflows/studio.yml@main
+    secrets: inherit

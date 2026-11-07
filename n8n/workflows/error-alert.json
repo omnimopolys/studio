@@ -1,0 +1,52 @@
+{
+  "name": "Omnimopolys – Error Alert",
+  "nodes": [
+    {
+      "name": "On workflow error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "name": "Discord",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "authentication": "webhook",
+        "content": "={{ '⚠️ n8n workflow failed: ' + $json.workflow.name + '\\n' + ($json.execution?.error?.message ?? '') + '\\n' + ($json.execution?.url ?? '') }}",
+        "options": {}
+      },
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "__DISCORD_CRED_ID__",
+          "name": "Discord omnimopolys"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "On workflow error": {
+      "main": [
+        [
+          {
+            "node": "Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin"
+  }
+}
